@@ -595,7 +595,7 @@ class ServersController extends AppController
      *		incremental - only new events
      *		<int>	- specific id of the event to pull
      */
-    public function pull($id = null, $technique='full')
+    public function pull($id = null, $technique=false, $fromPyMISP=false)
     {
         $this->Server->id = $id;
         if (!$this->Server->exists()) {
@@ -611,59 +611,72 @@ class ServersController extends AppController
             throw new NotFoundException(__('Invalid server'));
         }
         if (false == $this->Server->data['Server']['pull'] && ($technique == 'full' || $technique == 'incremental')) {
-			$error = __('Pull setting not enabled for this server.');
+            $this->Flash->info(__('Pull setting not enabled for this server.'));
+            $this->redirect(array('action' => 'index'));
         }
-		if (empty($error)) {
-	        if (!Configure::read('MISP.background_jobs')) {
-	            $result = $this->Server->pull($this->Auth->user(), $id, $technique, $s);
-				if (is_array($result)) {
-					$success = sprintf(__('Pull completed. %s events pulled, %s events could not be pulled, %s proposals pulled.', count($result[0]), count($result[1]), count($result[2])));
-				} else {
-					$error = $result;
-				}
-	            $this->set('successes', $result[0]);
-	            $this->set('fails', $result[1]);
-	            $this->set('pulledProposals', $result[2]);
-	            $this->set('lastpulledid', $result[3]);
-	        } else {
-	            $this->loadModel('Job');
-	            $this->Job->create();
-	            $data = array(
-	                    'worker' => 'default',
-	                    'job_type' => 'pull',
-	                    'job_input' => 'Server: ' . $id,
-	                    'status' => 0,
-	                    'retries' => 0,
-	                    'org' => $this->Auth->user('Organisation')['name'],
-	                    'message' => 'Pulling.',
-	            );
-	            $this->Job->save($data);
-	            $jobId = $this->Job->id;
-	            $process_id = CakeResque::enqueue(
-	                    'default',
-	                    'ServerShell',
-	                    array('pull', $this->Auth->user('id'), $id, $technique, $jobId)
-	            );
-	            $this->Job->saveField('process_id', $process_id);
-				$success = sprintf(__('Pull queued for background execution. Job ID: %s'), $jobId);
-	        }
-		}
-		if ($this->_isRest()) {
-			if (!empty($error)) {
-				return $this->RestResponse->saveFailResponse('Servers', 'pull', false, $error, $this->response->type());
-			} else {
-				return $this->RestResponse->saveSuccessResponse('Servers', 'pull', $success, $this->response->type());
-			}
-		} else {
-			if (!empty($error)) {
-				$this->Flash->error($error);
-				$this->redirect(array('action' => 'index'));
-			} else {
-				$this->Flash->success($success);
-				$this->redirect($this->referer());
-			}
-		}
+        if (!Configure::read('MISP.background_jobs')) {
+            $result = $this->Server->pull($this->Auth->user(), $id, $technique, $s);
+            // error codes
+            if (isset($result[0]) && is_numeric($result[0])) {
+                switch ($result[0]) {
+                    case '1':
+                        $this->Flash->error(__('Not authorised. This is either due to an invalid auth key, or due to the sync user not having authentication permissions enabled on the remote server. Another reason could be an incorrect sync server setting.'));
+                        break;
+                    case '2':
+                        $this->Flash->error($result[1]);
+                        break;
+                    case '3':
+                        throw new NotFoundException('Sorry, this is not yet implemented');
+                        break;
+                    case '4':
+                        $this->redirect(array('action' => 'index'));
+                        break;
+                }
+                $this->redirect($this->referer());
+            } else {
+                $this->set('successes', $result[0]);
+                $this->set('fails', $result[1]);
+                $this->set('pulledProposals', $result[2]);
+                $this->set('lastpulledid', $result[3]);
+            }
+        } else {
+            $this->loadModel('Job');
+            $this->Job->create();
+            $data = array(
+                    'worker' => 'default',
+                    'job_type' => 'pull',
+                    'job_input' => 'Server: ' . $id,
+                    'status' => 0,
+                    'retries' => 0,
+                    'org' => $this->Auth->user('Organisation')['name'],
+                    'message' => 'Pulling.',
+            );
+            $this->Job->save($data);
+            $jobId = $this->Job->id;
+            $process_id = CakeResque::enqueue(
+                    'default',
+                    'ServerShell',
+                    array('pull', $this->Auth->user('id'), $id, $technique, $jobId)
+            );
+            if ($fromPyMISP === false){
+                $this->Job->saveField('process_id', $process_id);
+                $this->Flash->success('Pull queued for background execution.');
+                $this->redirect($this->referer());
+            }else {
+                $this->layout = false;
+                $this->autoRender = false;
+                $this->set('data', Array('response'=>'Jobs added to queue'));
+                $this->response->type('json');
+                $this->render('/Servers/json/simple');
+        }
     }
+    /**
+     * Pull request called from PyMISP
+     */
+    public function batchPull($id = null, $technique=false){
+        $this->pull($id, $technique, $fromPyMSIP=true);
+    }
+
 
     public function push($id = null, $technique=false)
     {
@@ -1690,5 +1703,28 @@ class ServersController extends AppController
             }
         }
         return $view_data;
+    }
+    
+    /*
+    * Returns servers list in JSON format
+    */
+    public function getServersList()
+    {
+        $temp = $this->Server->find('all', array(
+            'conditions' => array(
+                'id !=' => $id_exclusion_list,
+            ),
+            'recursive' => -1,
+            'fields' => array('id', 'name', 'url')
+        ));
+        $servers = array();
+        foreach ($temp as $server) {
+            $servers[] = array('id' => $server['Server']['id'], 'name' => $server['Server']['name'], 'url' => $server['Server']['url']);
+        }
+        $this->layout = false;
+        $this->autoRender = false;
+        $this->set('data', $servers);
+        $this->response->type('json');
+        $this->render('/Servers/json/simple');
     }
 }
